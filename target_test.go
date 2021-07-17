@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	odoh "github.com/cloudflare/odoh-go"
 	"github.com/miekg/dns"
@@ -359,8 +360,8 @@ func TestQueryHandlerODoHWithInvalidKey(t *testing.T) {
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, request)
 
-	if status := rr.Result().StatusCode; status != http.StatusBadRequest {
-		t.Fatal(fmt.Errorf("Result did not yield %d, got %d instead", http.StatusBadRequest, status))
+	if status := rr.Result().StatusCode; status != http.StatusUnauthorized {
+		t.Fatal(fmt.Errorf("Result did not yield %d, got %d instead", http.StatusUnauthorized, status))
 	}
 }
 
@@ -390,5 +391,88 @@ func TestQueryHandlerODoHWithCorruptCiphertext(t *testing.T) {
 
 	if status := rr.Result().StatusCode; status != http.StatusBadRequest {
 		t.Fatal(fmt.Errorf("Result did not yield %d, got %d instead", http.StatusBadRequest, status))
+	}
+}
+
+func TestQueryHandlerODoHWithMalformedQuery(t *testing.T) {
+	r := createLocalResolver(t)
+	target := createTarget(t, r)
+
+	handler := http.HandlerFunc(target.targetQueryHandler)
+
+	// malformed odoh query
+	queryBytes := []byte{1, 2, 3}
+	request, err := http.NewRequest(http.MethodPost, queryEndpoint, bytes.NewReader(queryBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Add("Content-Type", odohMessageContentType)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, request)
+
+	if status := rr.Result().StatusCode; status != http.StatusBadRequest {
+		t.Fatal(fmt.Errorf("Result did not yield %d, got %d instead", http.StatusBadRequest, status))
+	}
+}
+
+func TestODoHResolutionWithRealResolver(t *testing.T) {
+	r := &targetResolver{
+		timeout:    2500 * time.Millisecond,
+		nameserver: "1.1.1.1:53",
+	}
+	target := createTarget(t, r)
+
+	handler := http.HandlerFunc(target.targetQueryHandler)
+
+	// malformed DNS query
+	obliviousQuery := odoh.CreateObliviousDNSQuery([]byte{1, 2, 3}, 0)
+	encryptedQuery, _, err := target.odohKeyPair.Config.Contents.EncryptQuery(obliviousQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, queryEndpoint, bytes.NewReader(encryptedQuery.Marshal()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Add("Content-Type", odohMessageContentType)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, request)
+
+	if status := rr.Result().StatusCode; status != http.StatusBadRequest {
+		t.Fatal(fmt.Errorf("Result did not yield %d, got %d instead", http.StatusBadRequest, status))
+	}
+
+	handler = http.HandlerFunc(target.targetQueryHandler)
+
+	// valid dns query
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	packedQuery, err := q.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	obliviousQuery = odoh.CreateObliviousDNSQuery([]byte(packedQuery), 0)
+	encryptedQuery, _, err = target.odohKeyPair.Config.Contents.EncryptQuery(obliviousQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request, err = http.NewRequest(http.MethodPost, queryEndpoint, bytes.NewReader(encryptedQuery.Marshal()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Add("Content-Type", odohMessageContentType)
+
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, request)
+
+	if status := rr.Result().StatusCode; status != http.StatusOK {
+		t.Fatal(fmt.Errorf("Result did not yield %d, got %d instead", http.StatusOK, status))
+	}
+	if rr.Result().Header.Get("Content-Type") != odohMessageContentType {
+		t.Fatal("Invalid content type response")
 	}
 }
